@@ -25,7 +25,19 @@ const storageKey='klartale-transcript-v1',libraryKey='klartale-library-v1',dicti
 const defaultDictionary='Kviktre = Quick3\nKvik3 = Quick3\nStopparot = StockPilot\nStoppilot = StockPilot\nJohn Anders = Jon Anders\nEurobus Nordic\nLeman\nfeeder';
 el('dictionary').value=localStorage.getItem(dictionaryKey)||defaultDictionary;
 el('dictionary-save').onclick=()=>{localStorage.setItem(dictionaryKey,el('dictionary').value);el('status').textContent='Ordlisten er lagret.'};
-function correctTerms(text){for(const line of el('dictionary').value.split(/\r?\n/)){const parts=line.split('=');if(parts.length!==2)continue;const from=parts[0].trim(),to=parts[1].trim();if(!from||!to)continue;const escaped=from.replace(/[.*+?^${}()|[\]\\]/g,'\\const storageKey='klartale-transcript-v1',libraryKey='klartale-library-v1';');try{text=text.replace(new RegExp('(^|[^\\p{L}\\p{N}])('+escaped+')(?=$|[^\\p{L}\\p{N}])','giu'),(_,prefix)=>prefix+to)}catch(e){}}return text}
+function correctTerms(text){
+ for(const line of el('dictionary').value.split(/\r?\n/)){
+  const parts=line.split('=');
+  if(parts.length!==2)continue;
+  const from=parts[0].trim(),to=parts[1].trim();
+  if(!from||!to)continue;
+  const escaped=from.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  try{
+   text=text.replace(new RegExp('(^|[^\\p{L}\\p{N}])('+escaped+')(?=$|[^\\p{L}\\p{N}])','giu'),(_,prefix)=>prefix+to);
+  }catch(e){}
+ }
+ return text;
+}
 function joinSegments(a,b){a=a.trim();b=b.trim();if(!a)return b;if(!b)return a;const aw=a.split(/\s+/),bw=b.split(/\s+/);let n=0;for(let k=Math.min(aw.length,bw.length,30);k>=3;k--){if(aw.slice(-k).join(' ').toLocaleLowerCase('no')===bw.slice(0,k).join(' ').toLocaleLowerCase('no')){n=k;break}}return a+' '+bw.slice(n).join(' ')}
 let meetings=[],activeId=null;
 const today=()=>{const d=new Date(),offset=d.getTimezoneOffset();return new Date(d.getTime()-offset*60000).toISOString().slice(0,10)};
