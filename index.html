@@ -123,7 +123,7 @@ function drawDiagnostics(){
  for(const d of diagnostics){
   const line=document.createElement('div');line.style.margin='8px 0';
   const label=document.createElement('span');
-  label.textContent=d.start+'–'+d.end+': '+(d.text?'Tekst ('+d.text.length+' tegn)':'INGEN TEKST')+' · lydnivå '+d.rms;
+  label.textContent=d.start+'–'+d.end+': '+(d.text?'Tekst ('+d.text.length+' tegn)':'INGEN TEKST')+' · lydnivå '+d.rms+' · '+(d.method||'standard')+' ('+(d.attempts||1)+' forsøk)';
   line.append(label);
   const btn=document.createElement('button');btn.type='button';btn.textContent='Hør bolk '+d.index;
   btn.onclick=async()=>{
@@ -159,14 +159,32 @@ el('start').onclick=async()=>{
    el('status').textContent='Transkriberer bolk '+(i+1)+' av '+total+' ('+Math.round(start)+'–'+Math.round(end)+' s)';
    const samples=resample(decoded,start,end);
    const rms=Math.sqrt(samples.reduce((acc,x)=>acc+x*x,0)/Math.max(samples.length,1));
-   let raw='',error=null;
+   let raw='',error=null,method='standard',attempts=1;
    try{
     const output=await transcriber(samples,{language:'norwegian',task:'transcribe'});
     if(typeof output?.text!=='string')throw new Error('Modellen ga ikke et tekstfelt');
     raw=output.text.trim();
    }catch(e){error=e.message||String(e)}
+   if(!raw&&rms>0.003&&!cancelled){
+    attempts++;method='utvidet lydvindu';
+    el('status').textContent='Bolk '+(i+1)+' ga tom tekst. Prøver med ekstra kontekst…';
+    try{
+     const padded=resample(decoded,Math.max(0,start-2),Math.min(decoded.duration,end+2));
+     const retry=await transcriber(padded,{language:'norwegian',task:'transcribe'});
+     raw=(retry?.text||'').trim();
+    }catch(e){error=(error?error+'; ':'')+'Utvidet vindu: '+(e.message||String(e))}
+   }
+   if(!raw&&rms>0.003&&!cancelled){
+    attempts++;method='alternativ Whisper Tiny';
+    el('status').textContent='Bolk '+(i+1)+' mangler fortsatt tekst. Prøver alternativ modell…';
+    try{
+     if(!window.__klartaleFallback)window.__klartaleFallback=await pipeline('automatic-speech-recognition','Xenova/whisper-tiny',{device:'wasm',dtype:'q8'});
+     const fallback=await window.__klartaleFallback(samples,{language:'norwegian',task:'transcribe'});
+     raw=(fallback?.text||'').trim();
+    }catch(e){error=(error?error+'; ':'')+'Alternativ modell: '+(e.message||String(e))}
+   }
    const missing=!raw&&rms>0.003;
-   diagnostics.push({index:i+1,start:timecode(start),end:timecode(end),startSeconds:start,endSeconds:end,rms:Number(rms.toFixed(5)),text:raw,missing,error});
+   diagnostics.push({index:i+1,start:timecode(start),end:timecode(end),startSeconds:start,endSeconds:end,rms:Number(rms.toFixed(5)),text:raw,missing,error,method,attempts});
    if(raw)assembled+=(assembled?'\n':'')+raw;
    el('result').value=correctTerms(assembled);persist();drawDiagnostics();
    el('progress').value=Math.round((i+1)/total*100);
