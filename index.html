@@ -14,7 +14,7 @@
 <div class="panel" id="meeting-library"><h2>📚 4. Mine møter – transkripsjonsbibliotek</h2>
 <p><label for="meeting-date">Møtedato</label><br><input id="meeting-date" type="date"></p>
 <p><label for="meeting-description">Beskrivelse av møte</label><br><input id="meeting-description" type="text" maxlength="180" placeholder="F.eks. Lagermøte – Eurobus Nordic" style="width:100%"></p>
-<p><button id="store" type="button">Lagre møte i biblioteket</button></p>
+<p><button id="store" type="button">Lagre møte i biblioteket</button></p><p><label for="import-txt">Importer tidligere TXT-transkripsjoner</label><br><input id="import-txt" type="file" accept=".txt,text/plain" multiple></p>
 <p><label for="meeting-search">Finn tidligere møter</label><br><input id="meeting-search" type="search" placeholder="Søk etter dato eller beskrivelse" style="width:100%"></p>
 <div id="meeting-list" aria-live="polite"></div>
 <p><small>Biblioteket lagres kun i nettleseren på denne enheten. Det synkroniseres ikke mellom mobil og PC, og kan forsvinne om nettleserdata slettes.</small></p></div>
@@ -51,7 +51,7 @@ function persist(){
 }
 function storeMeeting(){
  const desc=el('meeting-description').value.trim();
- if(!desc){el('saved-status').textContent='Skriv en beskrivelse av møtet først.';el('meeting-description').focus();return}
+ if(!desc){el('meeting-description').value='Møte '+(el('meeting-date').value||today())}
  if(!activeId){activeId=crypto.randomUUID?crypto.randomUUID():String(Date.now())+'-'+Math.random()}
  let m=meetings.find(x=>x.id===activeId);
  if(!m){m={id:activeId,created:new Date().toISOString()};meetings.push(m)}
@@ -69,6 +69,19 @@ function newMeeting(){
  activeId=null;el('result').value='';el('meeting-date').value=today();el('meeting-description').value='';try{localStorage.removeItem(storageKey)}catch(e){}el('saved-status').textContent='Nytt møte. Legg inn dato og beskrivelse.';renderLibrary();
 }
 el('store').onclick=storeMeeting;
+el('import-txt').addEventListener('change',async()=>{
+ const files=[...el('import-txt').files];let count=0;
+ for(const file of files){
+  try{
+   const txt=await file.text();
+   const name=file.name.replace(/\.txt$/i,'').trim()||'Importert møte';
+   meetings.push({id:crypto.randomUUID?crypto.randomUUID():String(Date.now())+'-'+Math.random(),date:today(),description:name,text:txt,created:new Date().toISOString(),updated:new Date().toISOString()});count++;
+  }catch(e){el('saved-status').textContent='Kunne ikke lese '+file.name}
+ }
+ if(count){writeLibrary();renderLibrary();el('saved-status').textContent=count+' TXT-fil(er) importert til møtebiblioteket.'}
+ el('import-txt').value='';
+});
+
 el('new').onclick=newMeeting;
 el('meeting-search').addEventListener('input',renderLibrary);
 el('meeting-date').addEventListener('change',()=>{if(activeId)persist()});
@@ -88,7 +101,7 @@ function resample(audio,start,end){const rate=audio.sampleRate;const count=Math.
 el('start').onclick=async()=>{
 const file=el('file').files[0];if(!file){el('status').textContent='Velg en lydfil først.';return}
 if(el('result').value.trim()&&!confirm('Erstatte teksten i det åpne møtet? Velg Nytt møte for å bevare den gamle transkripsjonen.'))return;
-if(!activeId&&el('meeting-description').value.trim())storeMeeting();
+if(!activeId)storeMeeting();
 cancelled=false;el('start').disabled=true;el('stop').disabled=false;el('progress').value=0;let ctx;
 try{
 el('status').textContent='Laster talegjenkjenningsmodell…';
