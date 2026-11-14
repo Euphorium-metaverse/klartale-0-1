@@ -133,16 +133,28 @@ for(let i=0;i<total;i++){
 if(cancelled)break;
 el('status').textContent='Transkriberer del '+(i+1)+' av '+total;
 const start=i*segmentSeconds,end=Math.min(decoded.duration,start+segmentSeconds);
-const output=await transcriber(resample(decoded,start,end),{language:'norwegian',task:'transcribe'});
-if(typeof output.text!=='string')throw new Error('Mangler transkripsjon for del '+(i+1));
-const raw=output.text.trim();segmentReport.push({index:i+1,start:timecode(start),end:timecode(end),text:raw,empty:!raw});
+const samples=resample(decoded,start,end);
+const rms=Math.sqrt(samples.reduce((sum,x)=>sum+x*x,0)/Math.max(samples.length,1));
+let raw='',attempts=0,error=null;
+for(let attempt=1;attempt<=2;attempt++){
+ attempts=attempt;
+ try{
+  const output=await transcriber(samples,{language:'norwegian',task:'transcribe',condition_on_prev_tokens:false});
+  if(typeof output?.text!=='string')throw new Error('Modellen returnerte ikke tekstfelt');
+  raw=output.text.trim();
+  if(raw || rms<0.002)break;
+  el('status').textContent='Tomt resultat for del '+(i+1)+'. Prøver igjen…';
+ }catch(e){error=e;if(attempt===2)break;}
+}
+const missing=!raw&&rms>=0.002;
+segmentReport.push({index:i+1,start:timecode(start),end:timecode(end),text:raw,empty:!raw,rms:Number(rms.toFixed(5)),attempts,warning:missing?'Lyd med tom transkripsjon':error?.message||null});
 assembled+=(assembled?'\n':'')+raw;
 el('result').value=correctTerms(assembled);
 const emptyCount=segmentReport.filter(x=>x.empty).length;el('segments-status').textContent=segmentReport.length+' av '+total+' segmenter behandlet. Tomme segmenter: '+emptyCount+(emptyCount?' – kontroller segmentrapporten':'');
 persist();el('progress').value=Math.round((i+1)/total*100);
 await new Promise(resolve=>setTimeout(resolve,0));
 }
-el('status').textContent=cancelled?'Stoppet. Ferdig tekst er beholdt.':'Ferdig! '+segmentReport.length+' av '+total+' lydsegmenter behandlet. Kontroller tekst og datoer mot opptaket.';
+const failed=segmentReport.filter(x=>x.warning==='Lyd med tom transkripsjon');el('status').textContent=cancelled?'Stoppet. Ferdig tekst er beholdt.':failed.length?'ADVARSEL: '+failed.length+' lydsegmenter inneholder lyd, men mangler transkripsjon. Last ned segmentrapporten.':'Ferdig! '+segmentReport.length+' av '+total+' lydsegmenter behandlet. Kontroller tekst og datoer mot opptaket.';
 }catch(err){console.error(err);el('status').textContent='Feil: '+err.message+'\nPrøv Whisper Tiny eller en kortere lydfil på PC.'}
 finally{if(ctx)await ctx.close().catch(()=>{});el('start').disabled=false;el('stop').disabled=true}
 };
