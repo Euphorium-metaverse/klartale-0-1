@@ -10,7 +10,7 @@
 </nav>
 <div class="panel" id="transcription"><h2>1. Velg lydfil</h2><input id="file" type="file" accept="audio/*,video/*"><p><small>For møter på 60–90 minutter anbefales PC med Chrome eller Edge. Mobil kan gå tom for minne. Ta gjerne opp på mobilen og last opp filen på PC.</small></p></div>
 <div class="panel"><h2>2. Transkriber</h2><label for="model">Modell</label><br><select id="model"><option value="onnx-community/nb-whisper-base-ONNX">NB-Whisper Base – norsk (anbefalt)</option><option value="Xenova/whisper-tiny">Whisper Tiny – raskere, mindre nøyaktig</option></select><p><small>Modellen lastes ned første gang og lagres normalt i nettleserens hurtigbuffer. Standardvalget bruker Nasjonalbibliotekets norsktilpassede NB-Whisper via Transformers.js. Første nedlasting kan ta tid.</small></p><button id="start">Start transkripsjon</button><button id="stop" disabled>Stopp etter bolken</button><p id="status" role="status">Klar.</p><progress id="progress" max="100" value="0"></progress></div>
-<div class="panel"><h2>Bedriftsordliste</h2><p><small>Ett begrep per linje. Skriv varianter som «Kviktre = Quick3». Brukes til forsiktig korrigering etter transkripsjon. Endre ved behov.</small></p><textarea id="dictionary" style="height:125px"></textarea><button id="dictionary-save" type="button">Lagre ordliste</button></div><div class="panel"><h2>Segmentkontroll</h2><p><small>Hvert segment lagres separat med tidsrom. Tomme segmenter markeres. Dette hjelper oss å finne manglende tekst.</small></p><button id="segments-download" type="button">Last ned segmentrapport</button><div id="segments-status" role="status">Ingen analyse utført.</div></div><div class="panel"><h2>3. Tekst</h2><textarea id="result" placeholder="Transkripsjonen vises her. Du kan redigere teksten."></textarea><p><small id="saved-status" role="status">Lagrer automatisk på denne enheten.</small></p><p><button id="save">Last ned TXT</button><button id="copy">Kopier</button><button id="new" type="button">Nytt møte</button></p><p><small>Teksten lagres lokalt i denne nettleseren. Last ned TXT som ekstra sikkerhetskopi.</small></p></div>
+<div class="panel"><h2>3. Tekst</h2><textarea id="result" placeholder="Transkripsjonen vises her. Du kan redigere teksten."></textarea><p><small id="saved-status" role="status">Lagrer automatisk på denne enheten.</small></p><p><button id="save">Last ned TXT</button><button id="copy">Kopier</button><button id="new" type="button">Nytt møte</button></p><p><small>Teksten lagres lokalt i denne nettleseren. Last ned TXT som ekstra sikkerhetskopi.</small></p></div>
 <div class="panel" id="meeting-library"><h2>📚 4. Mine møter – transkripsjonsbibliotek</h2>
 <p><label for="meeting-date">Møtedato</label><br><input id="meeting-date" type="date"></p>
 <p><label for="meeting-description">Beskrivelse av møte</label><br><input id="meeting-description" type="text" maxlength="180" placeholder="F.eks. Lagermøte – Eurobus Nordic" style="width:100%"></p>
@@ -21,27 +21,8 @@
 <p class="muted"><small>Testversjon. Kontroller navn, tall og viktige formuleringer mot originalopptaket. Ved lange opptak: hold fanen åpen og enheten våken.</small></p>
 </main><script type="module">
 const el=id=>document.getElementById(id);let cancelled=false;
-const storageKey='klartale-transcript-v1',libraryKey='klartale-library-v1',dictionaryKey='klartale-dictionary-v1';
-const defaultDictionary='Kviktre = Quick3\nKvik3 = Quick3\nStopparot = StockPilot\nStoppilot = StockPilot\nJohn Anders = Jon Anders\nEurobus Nordic\nLeman\nfeeder';
-el('dictionary').value=localStorage.getItem(dictionaryKey)||defaultDictionary;
-el('dictionary-save').onclick=()=>{localStorage.setItem(dictionaryKey,el('dictionary').value);el('status').textContent='Ordlisten er lagret.'};
-function correctTerms(text){
- for(const line of el('dictionary').value.split(/\r?\n/)){
-  const parts=line.split('=');
-  if(parts.length!==2)continue;
-  const from=parts[0].trim(),to=parts[1].trim();
-  if(!from||!to)continue;
-  const escaped=from.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-  try{
-   text=text.replace(new RegExp('(^|[^\\p{L}\\p{N}])('+escaped+')(?=$|[^\\p{L}\\p{N}])','giu'),(_,prefix)=>prefix+to);
-  }catch(e){}
- }
- return text;
-}
-function joinSegments(a,b){a=a.trim();b=b.trim();if(!a)return b;if(!b)return a;const aw=a.split(/\s+/),bw=b.split(/\s+/);let n=0;for(let k=Math.min(aw.length,bw.length,30);k>=3;k--){if(aw.slice(-k).join(' ').toLocaleLowerCase('no')===bw.slice(0,k).join(' ').toLocaleLowerCase('no')){n=k;break}}return a+' '+bw.slice(n).join(' ')}
-let meetings=[],activeId=null,segmentReport=[];
-const timecode=seconds=>{const n=Math.floor(seconds);return String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0')};
-el('segments-download').onclick=()=>{const blob=new Blob([JSON.stringify(segmentReport,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='klartale-segmentrapport.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000)};
+const storageKey='klartale-transcript-v1',libraryKey='klartale-library-v1';
+let meetings=[],activeId=null;
 const today=()=>{const d=new Date(),offset=d.getTimezoneOffset();return new Date(d.getTime()-offset*60000).toISOString().slice(0,10)};
 el('meeting-date').value=today();
 try{meetings=JSON.parse(localStorage.getItem(libraryKey)||'[]');if(!Array.isArray(meetings))meetings=[]}catch(e){meetings=[]}
@@ -127,34 +108,21 @@ el('status').textContent='Laster talegjenkjenningsmodell…';
 const {pipeline,env}=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1');
 env.allowLocalModels=false;
 const transcriber=await pipeline('automatic-speech-recognition',el('model').value,{device:'wasm',dtype:'q8',progress_callback:p=>{if(p.status==='progress'&&p.file)el('status').textContent='Laster modell: '+Math.round(p.progress||0)+' %'}});
-el('status').textContent='Leser lydfilen…';ctx=new AudioContext();const decoded=await ctx.decodeAudioData(await file.arrayBuffer());const segmentSeconds=20;const total=Math.max(1,Math.ceil(decoded.duration/segmentSeconds));let assembled='';segmentReport=[];el('segments-status').textContent='0 av '+total+' segmenter behandlet';
+el('status').textContent='Leser lydfilen…';ctx=new AudioContext();const decoded=await ctx.decodeAudioData(await file.arrayBuffer());const total=Math.ceil(decoded.duration/25);
 el('result').value='';persist();
 for(let i=0;i<total;i++){
 if(cancelled)break;
 el('status').textContent='Transkriberer del '+(i+1)+' av '+total;
-const start=i*segmentSeconds,end=Math.min(decoded.duration,start+segmentSeconds);
+const start=i*25,end=Math.min(decoded.duration,start+25);
 const samples=resample(decoded,start,end);
-const rms=Math.sqrt(samples.reduce((sum,x)=>sum+x*x,0)/Math.max(samples.length,1));
-let raw='',attempts=0,error=null;
-for(let attempt=1;attempt<=2;attempt++){
- attempts=attempt;
- try{
-  const output=await transcriber(samples,{language:'norwegian',task:'transcribe',condition_on_prev_tokens:false});
-  if(typeof output?.text!=='string')throw new Error('Modellen returnerte ikke tekstfelt');
-  raw=output.text.trim();
-  if(raw || rms<0.002)break;
-  el('status').textContent='Tomt resultat for del '+(i+1)+'. Prøver igjen…';
- }catch(e){error=e;if(attempt===2)break;}
-}
-const missing=!raw&&rms>=0.002;
-segmentReport.push({index:i+1,start:timecode(start),end:timecode(end),text:raw,empty:!raw,rms:Number(rms.toFixed(5)),attempts,warning:missing?'Lyd med tom transkripsjon':error?.message||null});
-assembled+=(assembled?'\n':'')+raw;
-el('result').value=correctTerms(assembled);
-const emptyCount=segmentReport.filter(x=>x.empty).length;el('segments-status').textContent=segmentReport.length+' av '+total+' segmenter behandlet. Tomme segmenter: '+emptyCount+(emptyCount?' – kontroller segmentrapporten':'');
+const output=await transcriber(samples,{language:'norwegian',task:'transcribe'});
+const recognized=(output.text||'').trim();
+el('result').value+=(i?'\n':'')+recognized;
+if(!recognized)el('status').textContent='Advarsel: del '+(i+1)+' ga ingen tekst. Fortsetter med neste del.';
 persist();el('progress').value=Math.round((i+1)/total*100);
 await new Promise(resolve=>setTimeout(resolve,0));
 }
-const failed=segmentReport.filter(x=>x.warning==='Lyd med tom transkripsjon');el('status').textContent=cancelled?'Stoppet. Ferdig tekst er beholdt.':failed.length?'ADVARSEL: '+failed.length+' lydsegmenter inneholder lyd, men mangler transkripsjon. Last ned segmentrapporten.':'Ferdig! '+segmentReport.length+' av '+total+' lydsegmenter behandlet. Kontroller tekst og datoer mot opptaket.';
+el('status').textContent=cancelled?'Stoppet. Ferdig tekst er beholdt.':'Ferdig! Les gjennom og korriger teksten.';
 }catch(err){console.error(err);el('status').textContent='Feil: '+err.message+'\nPrøv Whisper Tiny eller en kortere lydfil på PC.'}
 finally{if(ctx)await ctx.close().catch(()=>{});el('start').disabled=false;el('stop').disabled=true}
 };
