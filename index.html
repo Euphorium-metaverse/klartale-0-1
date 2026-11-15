@@ -20,7 +20,8 @@
 <p><small>Biblioteket lagres kun i nettleseren på denne enheten. Det synkroniseres ikke mellom mobil og PC, og kan forsvinne om nettleserdata slettes.</small></p></div>
 <p class="muted"><small>Testversjon. Kontroller navn, tall og viktige formuleringer mot originalopptaket. Ved lange opptak: hold fanen åpen og enheten våken.</small></p>
 </main><script type="module">
-const el=id=>document.getElementById(id);let cancelled=false,diagnostics=[],currentAudio=null;
+const el=id=>document.getElementById(id);let cancelled=false,diagnostics=[],currentAudio=null,generatedText='';
+const reviewDrafts=new WeakMap();
 const storageKey='klartale-transcript-v1',libraryKey='klartale-library-v1',dictionaryKey='klartale-dictionary-v1';
 const defaultDictionary='Kviktre = Quick3\nKvik3 = Quick3\nStopparot = StockPilot\nStoppilot = StockPilot\nJohn Anders = Jon Anders\nEurobus Nordic\nLeman\nfeeder';
 el('dictionary').value=localStorage.getItem(dictionaryKey)||defaultDictionary;
@@ -56,7 +57,7 @@ function renderLibrary(){
  const item=document.createElement('div');item.style.cssText='padding:12px 0;border-bottom:1px solid #dbe2eb';
  const title=document.createElement('strong');title.textContent=(m.date||'Uten dato')+' – '+(m.description||'Uten beskrivelse')+(m.id===activeId?' (åpent)':'');
  const open=document.createElement('button');open.textContent='Åpne';open.onclick=()=>{if(el('start').disabled)return;openMeeting(m.id)};
- const del=document.createElement('button');del.textContent='Slett';del.style.background='#8b3440';del.onclick=()=>{if(el('start').disabled)return;if(!confirm('Slette dette møtet permanent fra biblioteket?'))return;meetings=meetings.filter(x=>x.id!==m.id);if(activeId===m.id){activeId=null;el('result').value='';el('meeting-description').value='';el('meeting-date').value=today();try{localStorage.removeItem(storageKey)}catch(e){}}writeLibrary();renderLibrary()};
+ const del=document.createElement('button');del.textContent='Slett';del.style.background='#8b3440';del.onclick=()=>{if(el('start').disabled)return;if(!confirm('Slette dette møtet permanent fra biblioteket?'))return;meetings=meetings.filter(x=>x.id!==m.id);if(activeId===m.id){clearRecording();activeId=null;el('result').value='';el('meeting-description').value='';el('meeting-date').value=today();try{localStorage.removeItem(storageKey)}catch(e){}}writeLibrary();renderLibrary()};
  item.append(title,document.createElement('br'),open,del);container.append(item);
  }
 }
@@ -78,12 +79,13 @@ function storeMeeting(){
 function openMeeting(id){
  const m=meetings.find(x=>x.id===id);if(!m)return;
  if(activeId!==id&&el('result').value.trim()&&!activeId&&!confirm('Åpne møtet? Ulagret utkast blir erstattet.'))return;
+ if(activeId!==id)clearRecording();
  activeId=id;el('result').value=m.text||'';el('meeting-date').value=m.date||today();el('meeting-description').value=m.description||'';el('saved-status').textContent='Møte åpnet fra biblioteket.';renderLibrary();
 }
 function newMeeting(){
  if(el('start').disabled)return;
  if(el('result').value.trim()&&!activeId&&!confirm('Opprette nytt møte? Ulagret utkast blir erstattet.'))return;
- activeId=null;el('result').value='';el('meeting-date').value=today();el('meeting-description').value='';try{localStorage.removeItem(storageKey)}catch(e){}el('saved-status').textContent='Nytt møte. Legg inn dato og beskrivelse.';renderLibrary();
+ clearRecording();activeId=null;el('result').value='';el('meeting-date').value=today();el('meeting-description').value='';try{localStorage.removeItem(storageKey)}catch(e){}el('saved-status').textContent='Nytt møte. Legg inn dato og beskrivelse.';renderLibrary();
 }
 el('store').onclick=storeMeeting;
 el('import-txt').addEventListener('change',async()=>{
@@ -118,63 +120,162 @@ function resample(audio,start,end){const rate=audio.sampleRate;const count=Math.
 const timecode=seconds=>String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(Math.floor(seconds%60)).padStart(2,'0');
 function downloadJSON(){const blob=new Blob([JSON.stringify(diagnostics,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='klartale-diagnose.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000)}
 el('download-report').onclick=downloadJSON;
+function clearRecording(){
+ const player=el('chunk-player');
+ player.pause();
+ player.removeAttribute('src');
+ player.load();
+ player.style.display='none';
+ if(currentAudio?.url)URL.revokeObjectURL(currentAudio.url);
+ currentAudio=null;
+ diagnostics=[];
+ drawDiagnostics();
+}
+function wavClip(samples){
+ const bytes=new ArrayBuffer(44+samples.length*2),view=new DataView(bytes);
+ const tag=(offset,name)=>{for(let i=0;i<name.length;i++)view.setUint8(offset+i,name.charCodeAt(i))};
+ tag(0,'RIFF');view.setUint32(4,bytes.byteLength-8,true);tag(8,'WAVE');
+ tag(12,'fmt ');view.setUint32(16,16,true);view.setUint16(20,1,true);
+ view.setUint16(22,1,true);view.setUint32(24,16000,true);
+ view.setUint32(28,32000,true);view.setUint16(32,2,true);view.setUint16(34,16,true);
+ tag(36,'data');view.setUint32(40,samples.length*2,true);
+ for(let i=0;i<samples.length;i++)view.setInt16(44+i*2,Math.max(-1,Math.min(1,samples[i]))*32767,true);
+ return new Blob([bytes],{type:'audio/wav'});
+}
+function level(samples){
+ return Math.sqrt(samples.reduce((sum,x)=>sum+x*x,0)/Math.max(samples.length,1));
+}
+async function transcribeSamples(transcriber,samples){
+ const output=await transcriber(samples,{language:'norwegian',task:'transcribe'});
+ if(typeof output?.text!=='string')throw new Error('Modellen ga ikke et tekstfelt');
+ return output.text.trim();
+}
+async function suggestText(transcriber,samples,d){
+ const parts=[];
+ async function tryWindow(start,end,depth){
+  const window=samples.subarray(start,end);
+  if(cancelled||level(window)<=0.003)return;
+  d.attempts++;
+  try{
+   const text=await transcribeSamples(transcriber,window);
+   if(text){
+    parts.push({startSeconds:d.startSeconds+start/16000,endSeconds:d.startSeconds+end/16000,text});
+   }else if(depth&&window.length>=160000){
+    const mid=Math.floor((start+end)/2);
+    await tryWindow(start,mid,0);
+    await tryWindow(mid,end,0);
+   }
+  }catch(e){d.retryErrors.push(e.message||String(e))}
+ }
+ const mid=Math.floor(samples.length/2);
+ await tryWindow(0,mid,1);
+ await tryWindow(mid,samples.length,1);
+ return parts;
+}
+function updateTranscript(){
+ generatedText=correctTerms(diagnostics.map(d=>d.text).filter(Boolean).join('\n'));
+ el('result').value=generatedText;
+ persist();
+}
 function drawDiagnostics(){
  const container=el('chunk-report');container.replaceChildren();
  for(const d of diagnostics){
   const line=document.createElement('div');line.style.margin='8px 0';
   const label=document.createElement('span');
-  label.textContent=d.start+'–'+d.end+': '+(d.text?'Tekst ('+d.text.length+' tegn)':'INGEN TEKST')+' · lydnivå '+d.rms+' · '+(d.method||'standard')+' ('+(d.attempts||1)+' forsøk)';
-  line.append(label);
+  const state=d.text?'Tekst ('+d.text.length+' tegn)':d.error?'Modellfeil':d.suggestions.length?'Forslag til kontroll':d.attempts?'Ingen tekst':'Venter på transkripsjon';
+  label.textContent=d.start+'–'+d.end+' · '+state+' · lydnivå '+(d.rms??'–')+' · '+d.method+' ('+d.attempts+' forsøk)';
   const btn=document.createElement('button');btn.type='button';btn.textContent='Hør bolk '+d.index;
   btn.onclick=async()=>{
    if(!currentAudio)return;
-   const player=el('chunk-player');player.style.display='block';
-   player.src=currentAudio.url;player.currentTime=d.startSeconds;player.play().catch(()=>{});
-   player.ontimeupdate=()=>{if(player.currentTime>=d.endSeconds)player.pause()};
+   const player=el('chunk-player');
+   player.pause();
+   if(currentAudio.url)URL.revokeObjectURL(currentAudio.url);
+   const samples=resample(currentAudio.decoded,d.startSeconds,d.endSeconds);
+   currentAudio.url=URL.createObjectURL(wavClip(samples));
+   player.src=currentAudio.url;
+   player.style.display='block';
+   player.setAttribute('aria-label','Lyd for bolk '+d.index);
+   try{await player.play()}catch(e){if(e.name!=='AbortError')el('status').textContent='Kunne ikke spille bolk '+d.index+'. Prøv avspillingsknappen.'}
   };
-  line.append(btn);container.append(line);
+  line.append(label,btn);
+  if(!d.text&&!el('start').disabled){
+   const field=document.createElement('textarea');
+   field.style.height='5em';
+   field.setAttribute('aria-label','Tekst for bolk '+d.index);
+   field.placeholder='Skriv det du hører i bolken';
+   field.value=reviewDrafts.get(d)??correctTerms(d.suggestions.map(part=>part.text).join(' '));
+   field.oninput=()=>reviewDrafts.set(d,field.value);
+   const apply=document.createElement('button');
+   apply.type='button';apply.textContent='Sett inn bekreftet tekst';
+   apply.onclick=()=>{
+    const text=field.value.trim();
+    if(!text)return;
+    if(el('result').value!==generatedText){
+     el('status').textContent='Transkripsjonen er allerede redigert. Kopier bolkteksten inn på ønsket sted.';
+     field.focus();field.select();return;
+    }
+    d.text=text;d.missing=false;d.reviewed=true;
+    updateTranscript();drawDiagnostics();
+    el('status').textContent='Bekreftet tekst satt inn for bolk '+d.index+'.';
+   };
+   line.append(field,apply);
+  }
+  container.append(line);
  }
 }
 el('start').onclick=async()=>{
  const file=el('file').files[0];if(!file){el('status').textContent='Velg en lydfil først.';return}
  if(el('result').value.trim()&&!confirm('Erstatte teksten i det åpne møtet? Velg Nytt møte for å bevare den gamle transkripsjonen.'))return;
  if(!activeId)storeMeeting();
- cancelled=false;diagnostics=[];drawDiagnostics();el('start').disabled=true;el('stop').disabled=false;el('progress').value=0;let ctx;
+ clearRecording();
+ generatedText='';
+ cancelled=false;el('start').disabled=true;el('stop').disabled=false;
+ el('result').readOnly=true;el('progress').value=0;
+ let ctx;
  try{
-  if(currentAudio?.url)URL.revokeObjectURL(currentAudio.url);
-  currentAudio={url:URL.createObjectURL(file)};
-  el('status').textContent='Laster talegjenkjenningsmodell…';
-  const {pipeline,env}=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1');
-  env.allowLocalModels=false;
-  const transcriber=await pipeline('automatic-speech-recognition',el('model').value,{device:'wasm',dtype:'q8',progress_callback:p=>{if(p.status==='progress'&&p.file)el('status').textContent='Laster modell: '+Math.round(p.progress||0)+' %'}});
   el('status').textContent='Leser lydfilen…';
   ctx=new (window.AudioContext||window.webkitAudioContext)();
   const decoded=await ctx.decodeAudioData(await file.arrayBuffer());
+  currentAudio={decoded,url:null};
   const segmentSeconds=25,total=Math.ceil(decoded.duration/segmentSeconds);
-  let assembled='';
-  el('result').value='';persist();
-  for(let i=0;i<total;i++){
+  const model=el('model').value;
+  const method=model==='onnx-community/nb-whisper-base-ONNX'?'NB-Whisper':'Whisper Tiny';
+  diagnostics=Array.from({length:total},(_,i)=>{
+   const startSeconds=i*segmentSeconds,endSeconds=Math.min(decoded.duration,startSeconds+segmentSeconds);
+   return {index:i+1,start:timecode(startSeconds),end:timecode(endSeconds),startSeconds,endSeconds,
+    rms:null,text:'',missing:false,error:null,method,attempts:0,suggestions:[],retryErrors:[]};
+  });
+  drawDiagnostics();
+  el('status').textContent='Laster talegjenkjenningsmodell…';
+  const {pipeline,env}=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1');
+  env.allowLocalModels=false;
+  const transcriber=await pipeline('automatic-speech-recognition',model,{device:'wasm',dtype:'q8',progress_callback:p=>{if(p.status==='progress'&&p.file)el('status').textContent='Laster modell: '+Math.round(p.progress||0)+' %'}});
+  if(!cancelled)updateTranscript();
+  for(const d of diagnostics){
    if(cancelled)break;
-   const start=i*segmentSeconds,end=Math.min(decoded.duration,start+segmentSeconds);
-   el('status').textContent='Transkriberer bolk '+(i+1)+' av '+total+' ('+Math.round(start)+'–'+Math.round(end)+' s)';
-   const samples=resample(decoded,start,end);
-   const rms=Math.sqrt(samples.reduce((acc,x)=>acc+x*x,0)/Math.max(samples.length,1));
-   let raw='',error=null,method='NB-Whisper',attempts=1;
-   try{
-    const output=await transcriber(samples,{language:'norwegian',task:'transcribe'});
-    if(typeof output?.text!=='string')throw new Error('Modellen ga ikke et tekstfelt');
-    raw=output.text.trim();
-   }catch(e){error=e.message||String(e)}
-   const missing=!raw&&rms>0.003;
-   diagnostics.push({index:i+1,start:timecode(start),end:timecode(end),startSeconds:start,endSeconds:end,rms:Number(rms.toFixed(5)),text:raw,missing,error,method,attempts});
-   if(raw)assembled+=(assembled?'\n':'')+raw;
-   el('result').value=correctTerms(assembled);persist();drawDiagnostics();
-   el('progress').value=Math.round((i+1)/total*100);
+   el('status').textContent='Transkriberer bolk '+d.index+' av '+total;
+   const samples=resample(decoded,d.startSeconds,d.endSeconds);
+   const rms=level(samples);
+   d.rms=Number(rms.toFixed(5));
+   d.attempts=1;
+   try{d.text=await transcribeSamples(transcriber,samples)}
+   catch(e){d.error=e.message||String(e)}
+   d.missing=!d.text&&rms>0.003;
+   if(d.missing&&!d.error&&!cancelled&&method==='NB-Whisper'&&samples.length>=160000){
+    el('status').textContent='Prøver kortere lydvinduer i bolk '+d.index+' av '+total;
+    d.suggestions=await suggestText(transcriber,samples,d);
+   }
+   updateTranscript();drawDiagnostics();
+   el('progress').value=Math.round(d.index/total*100);
    await new Promise(resolve=>setTimeout(resolve,0));
   }
-  const missing=diagnostics.filter(d=>d.missing).length;
-  el('status').textContent=cancelled?'Stoppet. Beholdt tekst.':missing?'ADVARSEL: '+missing+' av '+diagnostics.length+' bolker har lyd, men mangler tekst. Bruk «Hør bolk» og last ned diagnoserapport.':'Ferdig: '+diagnostics.length+' bolker behandlet. Kontroller teksten mot opptaket.';
- }catch(err){console.error(err);el('status').textContent='Feil: '+err.message+'\nFerdige bolker er beholdt.'}
- finally{if(ctx)await ctx.close().catch(()=>{});el('start').disabled=false;el('stop').disabled=true}
+  const missing=diagnostics.filter(d=>d.missing||d.error).length;
+  el('status').textContent=cancelled?'Stoppet. Ferdige bolker og lyd er tilgjengelige.':missing?missing+' av '+total+' bolker trenger kontroll. Bruk «Hør bolk».':'Ferdig. Kontroller teksten mot opptaket.';
+ }catch(err){
+  el('status').textContent='Feil: '+err.message+'\nFerdige bolker er beholdt.';
+ }finally{
+  if(ctx)await ctx.close().catch(()=>{});
+  el('start').disabled=false;el('stop').disabled=true;el('result').readOnly=false;drawDiagnostics();
+ }
 };
 </script></body></html>
